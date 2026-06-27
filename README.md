@@ -9,7 +9,7 @@ Real-time music visualizer for the **Huidu HD-WF2** (ESP32-S3) HUB75 LED matrix 
 | Component | Details |
 |-----------|---------|
 | Controller | Huidu HD-WF2 — ESP32-S3, 8 MB PSRAM, 16 MB flash |
-| Display | 3 × 32×16 HUB75E panels chained → **96 × 16 pixels** total |
+| Display | 1–6 × 32×16 HUB75E panels chained (default 3 → **96 × 16 px**); configurable at runtime |
 | Panel driver | FM6126A |
 | Audio output | GPIO 14 → RC low-pass filter → speaker amp (PWM-DAC @ 312 kHz) |
 | RTC | BM8563 on I2C1 (SDA=41, SCL=42) |
@@ -24,7 +24,8 @@ Real-time music visualizer for the **Huidu HD-WF2** (ESP32-S3) HUB75 LED matrix 
 
 - **11 real-time visualizations** driven by FFT of incoming audio
 - **UDP raw PCM receiver** — stream from any device with ffmpeg
-- **Web UI** — switch visualizations, manage files, trigger OTA firmware update
+- **Web UI** — switch visualizations, set panel count, manage files, trigger OTA firmware update
+- **Runtime panel count** — set active visualization width (1–6 panels) and physical chain size independently; inactive panels go black; saved to NVS, applied after reboot
 - **LittleFS WAV playback** — plays `/music.wav` on boot if present; LEDC PWM-DAC output
 - **RTC clock fallback** — displays time when no audio is streaming
 - **NTP sync** on first boot (updates BM8563 RTC if >30 days stale)
@@ -81,12 +82,131 @@ After 2 seconds of silence the stream is marked idle and the clock is shown.
 
 ---
 
+## Scrolling Lyrics (YouTube + Genius)
+
+`tools/youtube_lyrics.py` watches your browser, detects the YouTube video title, fetches lyrics from Genius, and streams them line-by-line to the display ticker.
+
+### Setup
+
+```bash
+pip install pygetwindow requests lyricsgenius
+```
+
+1. Go to [genius.com/api-clients](https://genius.com/api-clients) → New API Client → Generate Access Token
+2. Paste the token into `GENIUS_TOKEN` at the top of `tools/youtube_lyrics.py`
+3. Flash the firmware, then run:
+
+```bash
+python tools/youtube_lyrics.py
+# or with explicit IP:
+python tools/youtube_lyrics.py 192.168.1.42
+```
+
+### How it works
+
+```
+YouTube tab: "Blinding Lights - The Weeknd - YouTube"
+    ↓  parse_title() strips noise  →  song="Blinding Lights"  artist="The Weeknd"
+    ↓  Genius API fetches lyrics
+    ↓  lines sent to ESP32 timed to scroll speed (one line finishes → next begins)
+GET /text?msg=I've+been+running+out+of+time
+    ↓
+Scrolls across bottom 8 rows in warm yellow  |  visualizer runs on upper rows
+```
+
+- Falls back to scrolling the song title if Genius can't find lyrics
+- Auto-clears when the YouTube tab is closed
+- Skips `[Chorus]` / `[Verse]` section headers automatically
+
+---
+
+## Emoji in ticker messages
+
+Any ticker message (HTTP `/text?msg=…` or `tickerSet()` in firmware) can include 8×8 pixel-art emoji by embedding the matching control character (`\x01`–`\x08`).  Each glyph occupies 9 pixels in the scroll stream.
+
+| Control char | Glyph | Description |
+|---|---|---|
+| `\x01` | ♪ | eighth note (white) |
+| `\x02` | ♥ | heart (red) |
+| `\x03` | ★ | diamond star (yellow) |
+| `\x04` | ⚡ | lightning bolt (yellow) |
+| `\x05` | 😊 | smiley face (yellow) |
+| `\x06` | 🌙 | crescent moon (steel-blue) |
+| `\x07` | 🔥 | flame (orange) |
+| `\x08` | 🎵 | double beamed note (green) |
+
+### Python example
+
+```python
+import requests, urllib.parse
+
+def ticker(ip, msg):
+    requests.get(f"http://{ip}/text?msg={urllib.parse.quote(msg)}")
+
+# Prefix a song title with a music note glyph
+ticker("192.168.1.42", "\x01 Blinding Lights \x02")
+
+# Show a now-playing message with fire + heart
+ticker("192.168.1.42", "\x07 fire track \x02")
+```
+
+### curl example
+
+```bash
+curl "http://192.168.1.42/text?msg=%01%20Now+Playing%3A+Blinding+Lights+%02"
+```
+
+(`%01` = `\x01` note, `%02` = `\x02` heart, URL-encoded)
+
+---
+
+## Panel Count
+
+Two independent panel counts are stored in NVS:
+
+| Setting | NVS key | Default | Meaning |
+|---------|---------|---------|---------|
+| **Active panels** | `panels` | 3 | Visualization area width (`SD_W = active × 32`) |
+| **Physical chain** | `max_panels` | = active | Total panels physically wired to the controller |
+
+The DMA hardware always drives the full physical chain. Panels beyond the active count receive solid black, so they appear off. Font size for the idle clock scales automatically: **size 2** (16 px, full display height) for 4+ active panels; **size 1** (8 px, top half) for 1–3 active panels.
+
+### Change from the web UI
+
+1. Open `http://<device-IP>/`
+2. Set **Active panels** — the visualization area (1–6)
+3. Set **Physical chain** — how many panels are physically connected (must be ≥ active)
+4. Click **Apply & Reboot** and confirm
+5. The device reboots (~3 s) and the page reloads automatically
+
+### Change via HTTP
+
+```
+GET http://<IP>/panels                → "active=N max=M"
+GET http://<IP>/panels?n=2&max=3     → set 2 active panels on a 3-panel physical chain, reboot
+GET http://<IP>/panels?n=4           → set 4 active (max stays unchanged), reboot
+```
+
+Rules: `n` must be 1–6, `max` must be ≥ `n` and ≤ 6.
+
+### Notes
+
+- Settings persist across power cycles (NVS)
+- All visualizations and the ticker scale automatically to the active width
+- Inactive panels go **black** every frame — they won't show stale visualization content
+- The simulator also has a panel count control under **Display Size** (no reboot needed there)
+
+---
+
 ## Web Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | Visualizer selector, UDP status, ffmpeg command |
+| `/` | GET | Visualizer selector, panel count, UDP status, ffmpeg command |
 | `/viz?n=N` | GET | Switch to visualization N (0–10) |
+| `/panels` | GET | Return `active=N max=M` |
+| `/panels?n=N&max=M` | GET | Set active + physical panel counts, save to NVS, reboot |
+| `/text?msg=...` | GET | Set scrolling ticker message (max 127 chars) |
 | `/play?f=/path.wav` | GET | Play a WAV file from LittleFS via LEDC output |
 | `/play?f=/path.wav&stop=1` | GET | Stop playback |
 | `/fs` | GET | File manager — list, download, delete files |
@@ -189,7 +309,7 @@ UDP packet (s16le 44100 Hz)
 | [ESP32Time](https://github.com/fbiego/ESP32Time) | Software RTC helper |
 | [Bounce2](https://github.com/thomasfredericks/Bounce2) | Button debounce |
 | Platform | [Jason2866/platform-espressif32](https://github.com/Jason2866/platform-espressif32) Arduino/IDF53 branch (Huidu board manifests) |
-
+40
 ---
 
 ## Hardware Links

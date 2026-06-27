@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SonicCanvas Simulator</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #111; color: #ddd;
+    font-family: 'Segoe UI', sans-serif; font-size: 13px;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 20px; gap: 16px; min-height: 100vh;
+  }
+  h1 { font-size: 1.3em; color: #fff; letter-spacing: 2px; }
+
+  /* ── display ── */
+  #wrap {
+    background: #000; border-radius: 8px;
+    padding: 12px; box-shadow: 0 0 40px #0006;
+    border: 1px solid #222;
+  }
+  canvas { display: block; image-rendering: pixelated; }
+
+  /* ── panels ── */
+  .panel {
+    background: #1a1a1a; border-radius: 8px;
+    padding: 12px 16px; width: 100%; max-width: 760px;
+    border: 1px solid #2a2a2a;
+  }
+  .panel h3 { font-size: .8em; color: #888; text-transform: uppercase;
+              letter-spacing: 1px; margin-bottom: 10px; }
+
+  /* ── viz buttons ── */
+  #vizBtns { display: flex; flex-wrap: wrap; gap: 6px; }
+  .vb {
+    padding: 5px 11px; border: none; border-radius: 4px;
+    cursor: pointer; font-size: .8em; color: #ccc;
+    background: #333; transition: background .15s;
+  }
+  .vb.active { background: #0a7; color: #fff; }
+  .vb:hover  { background: #444; }
+
+  /* ── controls row ── */
+  .row { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+  label { display: flex; flex-direction: column; gap: 3px; color: #aaa; font-size:.78em; }
+  label span { color: #eee; font-size: 1.05em; }
+  input[type=range] { width: 110px; accent-color: #0a7; }
+  input[type=number]{ width: 60px; background:#222; border:1px solid #444;
+                      color:#eee; border-radius:4px; padding:3px 6px; }
+  input[type=text]  { width: 280px; background:#222; border:1px solid #444;
+                      color:#eee; border-radius:4px; padding:4px 8px; }
+  button.btn {
+    padding: 6px 14px; border: none; border-radius: 4px;
+    cursor: pointer; font-size: .82em; color: #fff; background: #333;
+    transition: background .15s;
+  }
+  button.btn:hover { background: #444; }
+  button.btn.on    { background: #0a7; }
+  button.btn.red   { background: #a33; }
+
+  /* ── status ── */
+  #status { font-size:.75em; color:#666; }
+  .dot { display:inline-block; width:7px; height:7px; border-radius:50%;
+         background:#555; margin-right:4px; }
+  .dot.green { background:#0a7; }
+  .dot.yellow{ background:#fa0; }
+
+</style>
+</head>
+<body>
+
+<h1>⬛ SonicCanvas Simulator</h1>
+
+<div id="wrap"><canvas id="cv"></canvas></div>
+
+<div class="panel">
+  <h3>Visualization</h3>
+  <div id="vizBtns"></div>
+</div>
+
+<div class="panel">
+  <h3>Display Size</h3>
+  <div class="row">
+    <label>Panels<input type="number" id="cPanels" value="3" min="1" max="8"></label>
+    <label>Panel W<input type="number" id="cPanelW" value="32" min="8" max="64" step="8"></label>
+    <label>Panel H<input type="number" id="cPanelH" value="16" min="8" max="32" step="8"></label>
+    <label>Pixel size<span id="lPixSize">8</span>
+      <input type="range" id="cPixSize" min="4" max="24" value="8"></label>
+    <label>Gap<span id="lGap">2</span>
+      <input type="range" id="cGap" min="0" max="6" value="2"></label>
+    <label>Brightness<span id="lBright">100</span>%
+      <input type="range" id="cBright" min="10" max="100" value="100"></label>
+    <button class="btn" onclick="applySize()">Apply</button>
+  </div>
+</div>
+
+<div class="panel">
+  <h3>Audio</h3>
+  <div class="row">
+    <button class="btn" id="micBtn" onclick="toggleMic()">🎤 Enable Mic</button>
+    <span id="status"><span class="dot" id="micDot"></span>No audio — idle</span>
+    <label style="margin-left:auto">Gain<span id="lGain">1.0</span>×
+      <input type="range" id="cGain" min="1" max="8" value="1" step="0.5"></label>
+  </div>
+  <p style="font-size:.72em;color:#555;margin-top:6px">
+    ffmpeg (same command as ESP32, just change IP to localhost):<br>
+    <code style="color:#888">ffmpeg -f dshow -audio_buffer_size 50 -i audio="Stereo Mix (Realtek(R) Audio)" -ar 44100 -ac 1 -f s16le -flush_packets 1 "udp://127.0.0.1:4210?pkt_size=882"</code>
+  </p>
+</div>
+
+<div class="panel">
+  <h3>Ticker / Lyrics</h3>
+  <div class="row">
+    <input type="text" id="tickerInput" placeholder="Type a message or run youtube_lyrics.py pointing here">
+    <button class="btn" onclick="sendTicker()">Send</button>
+    <button class="btn red" onclick="clearTicker()">Clear</button>
+  </div>
+  <p style="font-size:.72em;color:#555;margin-top:6px">
+    Point the Python script here: <code style="color:#888">python youtube_lyrics.py localhost:3000</code>
+  </p>
+</div>
+
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+//  CONFIG
+// ═══════════════════════════════════════════════════════════════════
+let PANELS   = 3, PANEL_W = 32, PANEL_H = 16;
+let W = PANELS * PANEL_W, H = PANEL_H;
+let PIX = 8, GAP = 2;
+let BRIGHTNESS = 1.0, GAIN = 1.0;
+
+const SPECTRUM_BINS = 48;
+const FFT_N = 512;
+const OSC_BUF = 96;
+
+const VIZ_NAMES = [
+  'Spectrum','Mirror','Waterfall','Color Organ','Oscilloscope',
+  'Echo Wave','Fire','VU Meter','Beat Flash','Plasma','Starfield'
+];
+let vizMode = 0;
+
+// ═══════════════════════════════════════════════════════════════════
+//  FRAMEBUFFER
+// ═══════════════════════════════════════════════════════════════════
+let fb = null; // Uint8Array W*H*3
+
+function initFB() {
+  fb = new Uint8Array(W * H * 3);
+}
+
+function _set(x, y, r, g, b) {
+  if (x < 0 || x >= W || y < 0 || y >= H) return;
+  const i = (y * W + x) * 3;
+  fb[i] = r; fb[i+1] = g; fb[i+2] = b;
+}
+
+function clearFB() { fb.fill(0); }
+
+function drawPixel(x, y, rgb) { _set(x, y, rgb[0], rgb[1], rgb[2]); }
+
+function fillRect(x, y, w, h, rgb) {
+  for (let dy = 0; dy < h; dy++)
+    for (let dx = 0; dx < w; dx++)
+      _set(x+dx, y+dy, rgb[0], rgb[1], rgb[2]);
+}
+
+function fillScreen(rgb) { fillRect(0, 0, W, H, rgb); }
+
+function drawFastVLine(x, y, len, rgb) {
+  for (let dy = 0; dy < len; dy++) _set(x, y+dy, rgb[0], rgb[1], rgb[2]);
+}
+
+function drawFastHLine(x, y, len, rgb) {
+  for (let dx = 0; dx < len; dx++) _set(x+dx, y, rgb[0], rgb[1], rgb[2]);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  COLOUR HELPERS
+// ═══════════════════════════════════════════════════════════════════
+function hue(h) {
+  h = ((h % 1) + 1) % 1;
+  const s = h * 6, i = Math.floor(s), f = s - i;
+  const q = 1 - f;
+  let r, g, b;
+  switch(i % 6) {
+    case 0: r=1;  g=f;  b=0;  break;
+    case 1: r=q;  g=1;  b=0;  break;
+    case 2: r=0;  g=1;  b=f;  break;
+    case 3: r=0;  g=q;  b=1;  break;
+    case 4: r=f;  g=0;  b=1;  break;
+    default:r=1;  g=0;  b=q;  break;
+  }
+  return [Math.round(r*255), Math.round(g*255), Math.round(b*255)];
+}
+
+function dim(rgb, br) {
+  if (br <= 0) return [0,0,0];
+  if (br >= 1) return rgb;
+  return [rgb[0]*br|0, rgb[1]*br|0, rgb[2]*br|0];
+}
+
+function rgb(r, g, b) { return [r, g, b]; }
+
+function firePal(v) {
+  if (v < 128) return rgb(v*2, 0, 0);
+  if (v < 192) return rgb(255, (v-128)*4, 0);
+  return rgb(255, 255, (v-192)*4);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  FAST SIN TABLE
+// ═══════════════════════════════════════════════════════════════════
+const SIN_TAB = new Float32Array(256);
+for (let i = 0; i < 256; i++) SIN_TAB[i] = Math.sin(i * Math.PI * 2 / 256);
+function fsin(x) { return SIN_TAB[Math.round(x * 40.7437) & 255]; }
+
+// XOR-shift RNG
+let _rng = 0xDEADBEEF >>> 0;
+function rand8() {
+  _rng ^= _rng << 13; _rng ^= _rng >>> 17; _rng ^= _rng << 5;
+  return _rng & 0xFF;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  AUDIO / FFT
+// ═══════════════════════════════════════════════════════════════════
+let g_spectrum  = new Float32Array(SPECTRUM_BINS);
+let g_amplitude = 0;
+let g_osc       = new Float32Array(OSC_BUF);
+
+let audioCtx = null, analyser = null, fftBuf = null, timeBuf = null;
+let micActive = false;
+let demoPhase = 0;
+
+// UDP audio relayed from server (ffmpeg → server.js → WebSocket)
+let udpSpectrum = new Float32Array(SPECTRUM_BINS);
+let udpOsc      = new Float32Array(OSC_BUF);
+let udpLastMs   = 0;
+
+function setAudioSource(src) {
+  const dot  = document.getElementById('micDot');
+  const stat = document.getElementById('status');
+  if (src === 'udp') {
+    dot.className = 'dot green';
+    stat.innerHTML = '<span class="dot green"></span>ffmpeg UDP active';
+  } else if (src === 'mic') {
+    dot.className = 'dot green';
+    stat.innerHTML = '<span class="dot green"></span>Microphone active';
+  } else {
+    dot.className = 'dot';
+    stat.innerHTML = '<span class="dot"></span>No audio — idle';
+  }
+}
+
+function toggleMic() {
+  if (micActive) { stopMic(); return; }
+  navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+    .then(stream => {
+      audioCtx  = new AudioContext();
+      analyser  = audioCtx.createAnalyser();
+      analyser.fftSize = FFT_N;
+      analyser.smoothingTimeConstant = 0;
+      const src = audioCtx.createMediaStreamSource(stream);
+      const gain = audioCtx.createGain();
+      gain.gain.value = GAIN;
+      src.connect(gain); gain.connect(analyser);
+      fftBuf  = new Float32Array(analyser.frequencyBinCount);
+      timeBuf = new Float32Array(analyser.fftSize);
+      micActive = true;
+      document.getElementById('micBtn').classList.add('on');
+      document.getElementById('micBtn').textContent = '🎤 Mic On';
+      setAudioSource('mic');
+    })
+    .catch(e => alert('Mic error: ' + e.message));
+}
+
+function stopMic() {
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  micActive = false;
+  document.getElementById('micBtn').classList.remove('on');
+  document.getElementById('micBtn').textContent = '🎤 Enable Mic';
+  setAudioSource(isAudioActive() ? 'udp' : 'idle');
+}
+
+const SILENCE_THRESHOLD = 0.025; // below this amplitude → silence
+const SILENCE_TIMEOUT   = 2000;  // ms of silence before going idle (matches firmware)
+let   silenceStart      = 0;
+
+function isAudioActive() {
+  const hasSource = (Date.now() - udpLastMs) < 500 || (micActive && !!analyser);
+  if (!hasSource) { silenceStart = 0; return false; }
+
+  // Silence detection — same as firmware: 2 s of near-zero audio = idle
+  if (g_amplitude < SILENCE_THRESHOLD) {
+    if (silenceStart === 0) silenceStart = Date.now();
+    if ((Date.now() - silenceStart) > SILENCE_TIMEOUT) return false;
+  } else {
+    silenceStart = 0; // reset on any signal
+  }
+  return true;
+}
+
+function updateAudio() {
+  // Priority: UDP (ffmpeg) > mic — no demo mode, matches firmware behaviour
+  if ((Date.now() - udpLastMs) < 500) {
+    for (let b = 0; b < SPECTRUM_BINS; b++) {
+      const v = udpSpectrum[b];
+      g_spectrum[b] = g_spectrum[b] > v
+        ? g_spectrum[b] * 0.75 + v * 0.25
+        : g_spectrum[b] * 0.30 + v * 0.70;
+    }
+    for (let i = 0; i < OSC_BUF; i++) g_osc[i] = udpOsc[i];
+    let pk = 0; for (const v of g_spectrum) if (v > pk) pk = v;
+    g_amplitude = g_amplitude * 0.7 + pk * 0.3;
+    return;
+  }
+  if (micActive && analyser) {
+    analyser.getFloatFrequencyData(fftBuf);
+    analyser.getFloatTimeDomainData(timeBuf);
+
+    for (let b = 0; b < SPECTRUM_BINS; b++) {
+      const lo_f = b / SPECTRUM_BINS, hi_f = (b+1) / SPECTRUM_BINS;
+      const lo = 1 + Math.floor((FFT_N/2-1) * lo_f * lo_f);
+      const hi = Math.max(lo+1, 1 + Math.floor((FFT_N/2-1) * hi_f * hi_f));
+      let mx = -Infinity;
+      for (let k = lo; k < Math.min(hi, FFT_N/2); k++)
+        if (fftBuf[k] > mx) mx = fftBuf[k];
+      const norm = Math.max(0, (mx * GAIN + 90) / 90);
+      g_spectrum[b] = g_spectrum[b] > norm
+        ? g_spectrum[b] * 0.75 + norm * 0.25
+        : g_spectrum[b] * 0.30 + norm * 0.70;
+    }
+    const step = Math.floor(analyser.fftSize / OSC_BUF);
+    for (let i = 0; i < OSC_BUF; i++) g_osc[i] = timeBuf[i * step];
+    let pk = 0;
+    for (let b = 0; b < SPECTRUM_BINS; b++) if (g_spectrum[b] > pk) pk = g_spectrum[b];
+    g_amplitude = g_amplitude * 0.7 + pk * 0.3;
+  } else {
+    // no audio source — zero everything immediately
+    g_spectrum.fill(0);
+    g_osc.fill(0);
+    g_amplitude = 0;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  VISUALIZATIONS
+// ═══════════════════════════════════════════════════════════════════
+
+// ── shared state ────────────────────────────────────────────────────
+let sp_hue_off = 0, sp_peak = new Int32Array(SPECTRUM_BINS),
+    sp_hold = new Float32Array(SPECTRUM_BINS);
+
+let wf_buf = null, ew_buf = null, fire_g = null;
+let bf_fade = 0, bf_col = [255,255,255], bf_avg = 0.1, bf_hi = 0;
+let stars = null, stars_ok = false;
+let plasma_t = 0;
+
+function initVizBuffers() {
+  wf_buf = Array.from({length: H}, () => new Array(W).fill([0,0,0]));
+  ew_buf = Array.from({length: H}, () => new Array(W).fill([0,0,0]));
+  fire_g = Array.from({length: H+2}, () => new Uint8Array(W));
+  stars  = Array.from({length: 150}, () => ({
+    x:(rand8()-128)*(W/256), y:(rand8()-128)*(H/256),
+    z:rand8()/25.5+0.1, hue:rand8()/255
+  }));
+}
+
+let _lastT = performance.now();
+function dt() {
+  const now = performance.now(), d = (now - _lastT) / 1000;
+  _lastT = now; return Math.min(d, 0.15);
+}
+
+// 0 Spectrum
+function viz_spectrum() {
+  const d = dt();
+  sp_hue_off = (sp_hue_off + d * 0.08) % 1;
+  for (let b = 0; b < SPECTRUM_BINS; b++) {
+    const bH = Math.min(H, Math.round(g_spectrum[b] * H));
+    if (bH >= sp_peak[b]) { sp_peak[b] = bH; sp_hold[b] = 0.5; }
+    else { sp_hold[b] -= d; if (sp_hold[b] <= 0 && sp_peak[b] > 0) sp_peak[b]--; }
+    const h = sp_hue_off + b / SPECTRUM_BINS;
+    const x0 = b * 2, yS = H - bH;
+    if (bH < H) { drawFastVLine(x0,0,H-bH,[0,0,0]); drawFastVLine(x0+1,0,H-bH,[0,0,0]); }
+    for (let r = 0; r < bH; r++) {
+      const px = dim(hue(h + r * 0.005), 1 - r/H*0.6);
+      _set(x0,yS+r,px[0],px[1],px[2]); _set(x0+1,yS+r,px[0],px[1],px[2]);
+    }
+    if (bH > 0) { _set(x0,yS,255,255,255); _set(x0+1,yS,255,255,255); }
+    const py = H - sp_peak[b];
+    if (sp_peak[b] > bH && py >= 0 && py < H) {
+      _set(x0,py,255,224,0); _set(x0+1,py,255,224,0);
+    }
+  }
+}
+
+// 1 Mirror
+function viz_mirror() {
+  const d = dt(), cy = H >> 1;
+  sp_hue_off = (sp_hue_off + d * 0.08) % 1;
+  for (let b = 0; b < SPECTRUM_BINS; b++) {
+    const half = Math.min(cy, Math.round(g_spectrum[b] * cy));
+    const h = sp_hue_off + b / SPECTRUM_BINS;
+    const x0 = b * 2, blank = cy - half;
+    if (blank > 0) {
+      drawFastVLine(x0,0,blank,[0,0,0]); drawFastVLine(x0+1,0,blank,[0,0,0]);
+      drawFastVLine(x0,cy+half,blank,[0,0,0]); drawFastVLine(x0+1,cy+half,blank,[0,0,0]);
+    }
+    for (let i = 0; i < half; i++) {
+      const px = dim(hue(h + i*0.004), 1 - i/cy*0.55);
+      _set(x0,cy-1-i,px[0],px[1],px[2]); _set(x0+1,cy-1-i,px[0],px[1],px[2]);
+      _set(x0,cy+i,  px[0],px[1],px[2]); _set(x0+1,cy+i,  px[0],px[1],px[2]);
+    }
+    if (half > 0) {
+      _set(x0,cy-half,255,255,255); _set(x0+1,cy-half,255,255,255);
+      _set(x0,cy+half-1,255,255,255); _set(x0+1,cy+half-1,255,255,255);
+    }
+  }
+}
+
+// 2 Waterfall
+function viz_waterfall() {
+  dt();
+  // scroll down
+  for (let y = H-1; y > 0; y--) wf_buf[y] = wf_buf[y-1].slice();
+  wf_buf[0] = new Array(W).fill([0,0,0]);
+  for (let b = 0; b < SPECTRUM_BINS; b++) {
+    const m = g_spectrum[b];
+    const c = m > 0.02 ? dim(hue(b/SPECTRUM_BINS), m*0.9+0.1) : [0,0,0];
+    wf_buf[0][b*2] = c; wf_buf[0][b*2+1] = c;
+  }
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) { const c=wf_buf[y][x]; _set(x,y,c[0],c[1],c[2]); }
+}
+
+// 3 Color Organ
+function viz_colorgan() {
+  dt();
+  const vals = [0,0,0];
+  for (let b= 0;b<16;b++) vals[0]+=g_spectrum[b]; vals[0]/=16;
+  for (let b=16;b<32;b++) vals[1]+=g_spectrum[b]; vals[1]/=16;
+  for (let b=32;b<48;b++) vals[2]+=g_spectrum[b]; vals[2]/=16;
+  const xs=[0,W/3|0,(W/3*2)|0], hlo=[0,.33,.55], hhi=[.12,.45,.65];
+  const bw = W/3|0;
+  for (let band = 0; band < 3; band++) {
+    const bH = Math.min(H, Math.round(vals[band]*H));
+    fillRect(xs[band],0,bw,H-bH,[0,0,0]);
+    for (let row = 0; row < bH; row++) {
+      const t = 1-(row/Math.max(bH,1));
+      const h = hlo[band]+(hhi[band]-hlo[band])*(1-t);
+      const c = dim(hue(h), 0.4+0.6*t);
+      fillRect(xs[band],H-bH+row,bw,1,c);
+    }
+  }
+}
+
+// 4 Oscilloscope
+function viz_osc() {
+  const d = dt();
+  let oscHue = (oscHue||0); oscHue = (oscHue + d*0.12) % 1;
+  viz_osc._h = oscHue;
+  clearFB();
+  let pk = 0.01;
+  for (let i = 0; i < OSC_BUF; i++) { const a=Math.abs(g_osc[i]); if(a>pk) pk=a; }
+  let py = H>>1;
+  for (let x = 0; x < W; x++) {
+    const v = g_osc[Math.floor(x*OSC_BUF/W)] / pk;
+    const y = Math.min(H-1,Math.max(0, (H>>1) - Math.round(v*(H/2-1))));
+    const c = hue(viz_osc._h + x/W);
+    const y0=Math.min(py,y), y1=Math.max(py,y);
+    for (let ry=y0;ry<=y1;ry++) _set(x,ry,c[0],c[1],c[2]);
+    py = y;
+  }
+}
+viz_osc._h = 0;
+
+// 5 Echo Wave
+function viz_echowave() {
+  dt();
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++) ew_buf[y][x]=dim(ew_buf[y][x],0.78);
+  let pk=0.01;
+  for (let i=0;i<OSC_BUF;i++) { const a=Math.abs(g_osc[i]); if(a>pk) pk=a; }
+  let py=H>>1;
+  for (let x=0;x<W;x++) {
+    const v=g_osc[Math.floor(x*OSC_BUF/W)]/pk;
+    const y=Math.min(H-1,Math.max(0,(H>>1)-Math.round(v*(H/2-1))));
+    const y0=Math.min(py,y), y1=Math.max(py,y);
+    for (let ry=y0;ry<=y1;ry++) ew_buf[ry][x]=[255,255,255];
+    py=y;
+  }
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++) {
+    const c=ew_buf[y][x]; _set(x,y,c[0],c[1],c[2]);
+  }
+}
+
+// 6 Fire
+function viz_fire() {
+  dt();
+  const heat = Math.min(255, Math.max(0, g_amplitude*230+25)|0);
+  for (let x=0;x<W;x++) {
+    fire_g[H  ][x] = Math.max(0, heat - rand8()%35);
+    fire_g[H+1][x] = Math.max(0, heat - rand8()%15);
+  }
+  for (let y=H-1;y>=0;y--) {
+    const row=fire_g[y], p1=fire_g[y+1], p2=fire_g[y+2];
+    row[0]   = Math.max(0,((p1[W-1]+p1[0]+p1[1]+p2[0])>>2)-(rand8()&3));
+    for (let x=1;x<W-1;x++) row[x]=Math.max(0,((p1[x-1]+p1[x]+p1[x+1]+p2[x])>>2)-(rand8()&3));
+    row[W-1] = Math.max(0,((p1[W-2]+p1[W-1]+p1[0]+p2[W-1])>>2)-(rand8()&3));
+  }
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++) {
+    const c=firePal(fire_g[y][x]); _set(x,y,c[0],c[1],c[2]);
+  }
+}
+
+// 7 VU Meter
+function viz_vumeter() {
+  const d=dt();
+  const pk=[viz_vumeter._pk[0],viz_vumeter._pk[1],viz_vumeter._pk[2]];
+  const ph=[viz_vumeter._ph[0],viz_vumeter._ph[1],viz_vumeter._ph[2]];
+  const vals=[0,0,0];
+  for(let b=0;b<16;b++) vals[0]+=g_spectrum[b]; vals[0]/=16;
+  for(let b=16;b<32;b++) vals[1]+=g_spectrum[b]; vals[1]/=16;
+  for(let b=32;b<48;b++) vals[2]+=g_spectrum[b]; vals[2]/=16;
+  const y0s=[0,Math.floor(H*.37),Math.floor(H*.75)];
+  const hs=[Math.floor(H*.3),Math.floor(H*.3),Math.floor(H*.25)];
+  const lh=[0,0.35,0.55];
+  clearFB();
+  for (let s=0;s<3;s++) {
+    const v=vals[s], fill=Math.floor(v*W);
+    if (fill>=pk[s]*W) { pk[s]=v; ph[s]=0.7; }
+    else { ph[s]-=d; if(ph[s]<=0) pk[s]=Math.max(0,pk[s]-0.015); }
+    for (let x=0;x<fill&&x<W;x++) {
+      const t=x/W;
+      drawFastVLine(x,y0s[s],hs[s],dim(hue(lh[s]+t*0.15),0.5+t*0.5));
+    }
+    const p=(pk[s]*W-1)|0;
+    if (p>0&&p<W) drawFastVLine(p,y0s[s],hs[s],[255,255,255]);
+  }
+  viz_vumeter._pk=pk; viz_vumeter._ph=ph;
+}
+viz_vumeter._pk=[0,0,0]; viz_vumeter._ph=[0,0,0];
+
+// 8 Beat Flash
+function viz_beatflash() {
+  const d=dt();
+  bf_avg=bf_avg*0.96+g_amplitude*0.04;
+  if (g_amplitude>bf_avg*2.3&&g_amplitude>0.12&&bf_fade<0.15) {
+    bf_col=hue(bf_hi/12); bf_hi=(bf_hi+1)%12; bf_fade=1;
+  }
+  const br=bf_fade*bf_fade;
+  fillScreen(dim(bf_col,br));
+  for (let b=0;b<SPECTRUM_BINS;b++) {
+    const bH=Math.min(H,Math.round(g_spectrum[b]*H));
+    if (bH>0) {
+      const c=dim(hue(b/SPECTRUM_BINS),0.35);
+      drawFastVLine(b*2,H-bH,bH,c); drawFastVLine(b*2+1,H-bH,bH,c);
+    }
+  }
+  bf_fade=Math.max(0,bf_fade-d*2.8);
+}
+
+// 9 Plasma
+function viz_plasma() {
+  const d=dt();
+  plasma_t+=d*(0.9+g_amplitude*3);
+  for (let y=0;y<H;y++) {
+    const cy=y-H/2;
+    for (let x=0;x<W;x++) {
+      const cx=x-W/2;
+      const v = fsin(x*0.18+plasma_t)
+              + fsin(y*0.90+plasma_t*1.4)
+              + fsin((x+y)*0.12+plasma_t*0.8)
+              + fsin(Math.sqrt(cx*cx+cy*cy+1)*0.25+plasma_t);
+      const c=hue((v+4)/8);
+      _set(x,y,c[0],c[1],c[2]);
+    }
+  }
+}
+
+// 10 Starfield
+function viz_stars() {
+  const d=dt();
+  const spd=d*(1.2+g_amplitude*10);
+  clearFB();
+  for (const s of stars) {
+    s.z-=spd;
+    if (s.z<=0.05) {
+      s.x=(rand8()-128)*(W/256); s.y=(rand8()-128)*(H/256);
+      s.z=10; s.hue=rand8()/255;
+    }
+    const sx=Math.round(s.x/s.z*(W/2))+W/2;
+    const sy=Math.round(s.y/s.z*(H/2))+H/2;
+    if (sx>=0&&sx<W&&sy>=0&&sy<H) {
+      const br=1-s.z/10;
+      const c=dim(hue(s.hue+(1-s.z/10)*0.08),br);
+      _set(sx,sy,c[0],c[1],c[2]);
+    }
+  }
+}
+
+const vizFuncs = [
+  viz_spectrum, viz_mirror, viz_waterfall, viz_colorgan, viz_osc,
+  viz_echowave, viz_fire, viz_vumeter, viz_beatflash, viz_plasma, viz_stars
+];
+
+// ═══════════════════════════════════════════════════════════════════
+//  TICKER
+// ═══════════════════════════════════════════════════════════════════
+let tickerMsg = '', tickerX = 0, tickerPxLen = 0;
+const TICKER_SPEED = 0.5; // px/frame — matches firmware ticker.h
+const TICKER_Y_FRAC = 0.5; // bottom 50% of display
+
+function tickerSet(msg) {
+  tickerMsg = msg;
+  tickerX   = W;
+  tickerPxLen = msg.length * 6;
+}
+
+function tickerDraw(ctx, offY) {
+  if (!tickerMsg) return;
+  tickerX -= TICKER_SPEED;
+  if (tickerX < -tickerPxLen) tickerX = W;
+  const CELL = PIX + GAP;
+  const ty   = offY + Math.floor(H * TICKER_Y_FRAC) * CELL;
+  const th   = Math.ceil(H * 0.5) * CELL;
+  ctx.fillStyle = 'rgba(0,0,32,0.85)';
+  ctx.fillRect(0, ty, W * CELL, th);
+  ctx.fillStyle = '#ffdc50';
+  ctx.font = `${Math.max(8, PIX * 1.1)|0}px monospace`;
+  ctx.textBaseline = 'top';
+  ctx.fillText(tickerMsg, tickerX * PIX/6 * (CELL/10) + 0, ty + 2);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  CANVAS RENDER
+// ═══════════════════════════════════════════════════════════════════
+const canvas = document.getElementById('cv');
+const ctx    = canvas.getContext('2d');
+
+function applySize() {
+  PANELS  = +document.getElementById('cPanels').value;
+  PANEL_W = +document.getElementById('cPanelW').value;
+  PANEL_H = +document.getElementById('cPanelH').value;
+  PIX     = +document.getElementById('cPixSize').value;
+  GAP     = +document.getElementById('cGap').value;
+  W = PANELS * PANEL_W; H = PANEL_H;
+  canvas.width  = W * (PIX + GAP);
+  canvas.height = H * (PIX + GAP);
+  initFB();
+  initVizBuffers();
+  // reset mode-specific state
+  sp_peak.fill(0); sp_hold.fill(0);
+}
+
+function renderCanvas() {
+  const CELL = PIX + GAP;
+  ctx.fillStyle = '#050505';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const br = BRIGHTNESS;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 3;
+      let r = fb[i]*br|0, g = fb[i+1]*br|0, b = fb[i+2]*br|0;
+      if (r===0 && g===0 && b===0) {
+        ctx.fillStyle = '#0d0d0d'; // dim "off" LED
+      } else {
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+      }
+      const px = x * CELL, py = y * CELL;
+      ctx.beginPath();
+      const rad = Math.max(1, PIX * 0.18);
+      ctx.roundRect(px, py, PIX, PIX, rad);
+      ctx.fill();
+    }
+  }
+  tickerDraw(ctx, 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  WEBSOCKET (receive from server)
+// ═══════════════════════════════════════════════════════════════════
+function connectWS() {
+  const ws = new WebSocket(`ws://${location.host}`);
+  ws.onmessage = e => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'ticker')   { tickerSet(msg.msg); }
+      if (msg.type === 'viz')      { setViz(msg.n); }
+      if (msg.type === 'audio')    {
+        udpSpectrum.set(msg.spectrum);
+        udpOsc.set(msg.osc);
+        udpLastMs = Date.now();
+        setAudioSource('udp');
+      }
+      if (msg.type === 'udp_idle') { udpLastMs = 0; setAudioSource(micActive ? 'mic' : 'idle'); }
+    } catch(_) {}
+  };
+  ws.onclose = () => setTimeout(connectWS, 2000);
+}
+connectWS();
+
+// ═══════════════════════════════════════════════════════════════════
+//  UI WIRING
+// ═══════════════════════════════════════════════════════════════════
+function setViz(n) {
+  vizMode = n;
+  clearFB();
+  document.querySelectorAll('.vb').forEach((b,i) =>
+    b.classList.toggle('active', i === n));
+}
+
+function sendTicker() {
+  const msg = document.getElementById('tickerInput').value.trim();
+  if (msg) tickerSet(msg);
+}
+function clearTicker() { tickerMsg = ''; document.getElementById('tickerInput').value=''; }
+
+// Sliders
+document.getElementById('cPixSize').oninput = e => {
+  PIX = +e.target.value;
+  document.getElementById('lPixSize').textContent = PIX;
+  canvas.width  = W * (PIX + GAP);
+  canvas.height = H * (PIX + GAP);
+};
+document.getElementById('cGap').oninput = e => {
+  GAP = +e.target.value;
+  document.getElementById('lGap').textContent = GAP;
+  canvas.width  = W * (PIX + GAP);
+  canvas.height = H * (PIX + GAP);
+};
+document.getElementById('cBright').oninput = e => {
+  BRIGHTNESS = e.target.value / 100;
+  document.getElementById('lBright').textContent = e.target.value;
+};
+document.getElementById('cGain').oninput = e => {
+  GAIN = +e.target.value;
+  document.getElementById('lGain').textContent = GAIN.toFixed(1);
+  if (audioCtx) {
+    // update gain node if connected — simple approach: reconnect not needed,
+    // just store and apply during spectrum mapping above
+  }
+};
+
+// Build viz buttons
+const vd = document.getElementById('vizBtns');
+VIZ_NAMES.forEach((nm, i) => {
+  const b = document.createElement('button');
+  b.textContent = nm; b.className = 'vb' + (i===0?' active':'');
+  b.onclick = () => setViz(i);
+  vd.appendChild(b);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+//  MAIN LOOP
+// ═══════════════════════════════════════════════════════════════════
+function loop() {
+  updateAudio();
+  const active = isAudioActive();
+  if (active) {
+    vizFuncs[vizMode]();
+  } else {
+    clearFB();
+  }
+  renderCanvas();
+  if (!active) {
+    // idle overlay — matches ESP32 "UDP idle" text on top rows
+    const CELL = PIX + GAP;
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(0, 0, canvas.width, canvas.height * 0.55);
+    ctx.fillStyle = '#444';
+    ctx.font = `${Math.max(10, PIX * 1.4)|0}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('no audio', canvas.width / 2, canvas.height * 0.28);
+    ctx.font = `${Math.max(8, PIX * 0.9)|0}px monospace`;
+    ctx.fillStyle = '#2a2a2a';
+    ctx.fillText('start ffmpeg or enable mic', canvas.width / 2, canvas.height * 0.44);
+    ctx.textAlign = 'left';
+  }
+  requestAnimationFrame(loop);
+}
+
+// Init and start
+applySize();
+loop();
+</script>
+</body>
+</html>
